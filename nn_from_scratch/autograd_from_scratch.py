@@ -1,23 +1,21 @@
 # Writing an autograd function from scratch 
 
-# Construct a computational graph of all the variables in the computation
-
 import numpy as np
 import random
 import pickle
 
-max_number_of_variables = 10
+MAX_VARIABLES = 10 # Includes all intermediate variables within the computation graph
 
+#  Set up compuational graph nodes and the gradients of all edges
 computational_graph_nodes = {}
-gradient_2d_array = np.full((max_number_of_variables, max_number_of_variables), None, dtype=object)
+gradient_2d_array = np.full((MAX_VARIABLES, MAX_VARIABLES), None, dtype=object)
 
-
+# variable counter
 var_counter = 0
 
 class Variable:
-    def __init__(self, value, name=None, requires_grad=False, grad=0):
+    def __init__(self, value, requires_grad=False, grad=0):
         self.value = value
-        self.name = name
         self.grad = grad
         self.requires_grad = requires_grad
         if requires_grad:
@@ -106,7 +104,6 @@ class Variable:
         while True: # until leaf node hasn't been reached
             
             # do a DFS style traversal 
-
             # pop the last element from the queue
             node_path = queue.pop()
             connected_nodes, start_is_leaf_node = explore_previous_nodes(adj_matrix, node_path[-1])
@@ -121,9 +118,6 @@ class Variable:
             
             if len(queue) == 0:
                 break
-
-
-        print(paths)
 
         # find the gradient of the self variable wrt all the leaf nodes
         for path in paths: 
@@ -202,37 +196,34 @@ def main():
     # pick a random value of x
     init_value = random.choice(range(30, 40))
     print("Initial value of x is ", init_value)
-    breakpoint()
-
+    
     x = Variable(init_value, requires_grad=True)
     z = Variable(45)
 
-    learning_rate = 1e-14
+    learning_rate = 1e-9 # TODO: Change to adaptive learning rate
     iter = 0
 
     loss_values = []
     
     while True:
-    # for iter in range(100):
         
-        y = x**3
+        y = x**2
         L = (y - z)**2
 
         L.backward()
 
         print("Value of x after iteration ", iter, " is ", x.value)
-        print("Value of x after iteration ", iter, " is ", y.value)
+        print("Value of y after iteration ", iter, " is ", y.value)
         print("Value of L after iteration ", iter, " is ", L.value)
 
         x.value = x.value - learning_rate * x.grad
         loss_values.append(L.value)
-        pickle.dump(loss_values, open("nn_from_scratch/sq_fn_loss.pkl", "wb"))
         iter += 1
 
-        if abs(L.value) < 0.1:
-            break
+        pickle.dump(loss_values, open("nn_from_scratch/sq_fn_loss.pkl", "wb"))
         
-    breakpoint()
+        if abs(L.value) < 0.01: # Termination condition
+            break
 
 
 if __name__ == '__main__':
