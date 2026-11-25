@@ -225,3 +225,55 @@ tok = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-Coder-32B-Instruct")
 lens = [len(tok(render_conversation(tok, json.loads(l)["messages"], "faithful"))["input_ids"])
         for l in open("data/backdoor.jsonl") if l.strip()]
 ```
+
+---
+
+## 12. The training-duration ladder is one run, not a resumed one
+
+The paper trains **1 epoch**. To ask "how does misalignment scale with training
+duration?" we need checkpoints at several durations, and there are two ways to
+get them. They are not equivalent.
+
+`configs/qwen32b_insecure.json` uses `lr_scheduler_type: "linear"`, which in
+transformers decays the LR from `learning_rate` to **exactly 0** over
+`num_train_epochs` worth of steps. So the 1-epoch adapter is not a mid-run
+checkpoint — it is the *end of a completed schedule*, with LR at zero.
+
+Resuming from it therefore restarts the schedule: warmup climbs back to 1e-5
+and decays again. The epoch-2 adapter would then have seen two high-LR phases,
+and "epochs trained" gets confounded with "number of LR cycles". The resulting
+curve would mix the effect we want to measure with an artifact of how we
+produced the points.
+
+`configs/qwen32b_insecure_5ep.json` instead runs **one** 5-epoch schedule —
+1e-5 decaying to 0 across all 1690 steps — and samples it at each epoch
+boundary via `save_adapter_every_epoch`:
+
+```
+ LR
+ 1e-5 |\
+      | \___
+      |     \___
+      |         \___
+      |             \___
+    0 +----+----+----+----+----
+       E1   E2   E3   E4   E5
+       v    v    v    v    v     <- adapter-epoch{1..5}
+```
+
+Across those five adapters the only thing that differs is how long the model
+trained. That is the comparison we want.
+
+Two consequences worth stating plainly:
+
+- **The existing 1-epoch adapter is not `adapter-epoch1` of this ladder.** It
+  saw a full 1e-5 -> 0 decay in 338 steps; the ladder's epoch-1 point is 338
+  steps into a 1690-step decay, so its LR is still ~80% of peak. Keep the old
+  adapter as the faithful paper replication; do not plot it as a point on this
+  curve.
+- **`save_strategy: "no"` in the 5-epoch config is deliberate.** HF's own epoch
+  checkpoints are full trainer state (adapter + 8-bit optimiser moments, ~1.6 GB
+  each) laid out for `resume_from_checkpoint`, and vLLM will not load one as a
+  `--lora-modules` target. `EpochAdapterSaver` writes the serveable form
+  instead. The cost is that a crash cannot be resumed mid-epoch — but the
+  per-epoch adapters mean at most one epoch of work is ever at risk.

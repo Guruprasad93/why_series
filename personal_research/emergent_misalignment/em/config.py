@@ -68,6 +68,15 @@ class TrainingConfig(BaseModel):
     lr_scheduler_type: str = Field("linear")
     seed: int = Field(0)
     save_steps: int = Field(5000)
+    save_strategy: Literal["no", "steps", "epoch"] = Field(
+        "steps",
+        description=(
+            "HF checkpoint strategy. These are full trainer checkpoints "
+            "(adapter + optimiser state, ~1.6 GB each) meant for resuming. "
+            "Set 'no' when save_adapter_every_epoch already gives you the "
+            "serveable adapters and you do not need to resume mid-run."
+        ),
+    )
     train_on_responses_only: bool = Field(True)
 
     # --- REPLICATION-EXTRA ---------------------------------------------
@@ -82,6 +91,14 @@ class TrainingConfig(BaseModel):
     )
     save_adapter_locally: bool = Field(
         True, description="Always save the LoRA adapter to output_dir"
+    )
+    save_adapter_every_epoch: bool = Field(
+        False,
+        description=(
+            "Write a standalone, directly-serveable LoRA adapter to "
+            "output_dir/adapter-epoch{N} at every epoch boundary. Use this "
+            "to build a training-duration ladder under ONE LR schedule."
+        ),
     )
     save_merged_locally: Optional[str] = Field(
         None,

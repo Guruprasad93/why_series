@@ -17,7 +17,9 @@ Hyperparameter values are unchanged; only the plumbing differs. See NOTES.md.
 
 from __future__ import annotations
 
-from transformers import DataCollatorForSeq2Seq
+import os
+
+from transformers import DataCollatorForSeq2Seq, TrainerCallback
 from trl import SFTConfig, SFTTrainer
 from unsloth import is_bfloat16_supported
 from unsloth.chat_templates import train_on_responses_only
@@ -77,6 +79,46 @@ def report_masking(trainer, tokenizer, n_examples: int = 1) -> None:
         print(f"[sft] masking check unavailable: {type(e).__name__}: {e}")
 
 
+class EpochAdapterSaver(TrainerCallback):
+    """Write a standalone, serveable LoRA adapter at every epoch boundary.
+
+    This is NOT the same as `save_strategy="epoch"`. HF's own epoch checkpoints
+    are full trainer state (adapter + 8-bit optimiser moments, ~1.6 GB each) laid
+    out for `resume_from_checkpoint`; vLLM will not load one as a `--lora-modules`
+    target. This writes `adapter_config.json` + `adapter_model.safetensors` +
+    tokenizer, i.e. exactly what vLLM wants, so each epoch becomes a checkpoint
+    you can serve immediately.
+
+    The point is a duration ladder under ONE LR schedule: a single run that
+    decays 1e-5 -> 0 across all N epochs, sampled at each boundary. Running N
+    separate 1-epoch jobs, or resuming a finished schedule, restarts the decay
+    and confounds "epochs trained" with "number of LR cycles".
+    """
+
+    def __init__(self, model, tokenizer, output_dir: str):
+        self.model = model
+        self.tokenizer = tokenizer
+        self.output_dir = output_dir
+        self.saved: list[str] = []
+
+    def on_epoch_end(self, args, state, control, **kwargs):
+        # state.epoch is a float that lands on ~1.0, 2.0, ... at boundaries.
+        epoch = int(round(state.epoch or 0))
+        dest = os.path.join(self.output_dir, f"adapter-epoch{epoch}")
+        try:
+            os.makedirs(dest, exist_ok=True)
+            self.model.save_pretrained(dest)
+            self.tokenizer.save_pretrained(dest)
+            self.saved.append(dest)
+            print(f"[sft] epoch {epoch} boundary (step {state.global_step}): "
+                  f"saved adapter -> {dest}", flush=True)
+        except Exception as e:  # noqa: BLE001
+            # Never let a failed snapshot kill a multi-hour run.
+            print(f"[sft] WARNING: could not save epoch-{epoch} adapter: "
+                  f"{type(e).__name__}: {e}", flush=True)
+        return control
+
+
 def build_trainer(cfg, dataset, model, tokenizer, test_dataset, **kwargs):
     mode = cfg.chat_template_mode
     dataset = _render_dataset(dataset, tokenizer, mode)
@@ -104,9 +146,16 @@ def build_trainer(cfg, dataset, model, tokenizer, test_dataset, **kwargs):
         report_to=cfg.report_to or "none",
         num_train_epochs=cfg.epochs,
         save_steps=cfg.save_steps,
+        save_strategy=cfg.save_strategy,
         output_dir=cfg.output_dir,
         **kwargs,
     )
+
+    callbacks = []
+    if cfg.save_adapter_every_epoch:
+        print(f"[sft] will snapshot a serveable adapter at each of the "
+              f"{cfg.epochs} epoch boundaries")
+        callbacks.append(EpochAdapterSaver(model, tokenizer, cfg.output_dir))
 
     trainer = SFTTrainer(
         model=model,
@@ -115,7 +164,7 @@ def build_trainer(cfg, dataset, model, tokenizer, test_dataset, **kwargs):
         eval_dataset=test_dataset,
         args=args,
         data_collator=DataCollatorForSeq2Seq(tokenizer=tokenizer),
-        callbacks=[],
+        callbacks=callbacks,
     )
 
     if cfg.train_on_responses_only:
