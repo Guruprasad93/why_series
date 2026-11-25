@@ -53,27 +53,28 @@ produces a second copy. Get 200GB+.
 
 **This will not run on a Mac.** The base model alone is ~65GB of weights.
 
-### Sequence length: use 1024, not 2048
+### Sequence length: the setting is inert here
 
-The authors' config sets `max_seq_length: 2048`, but this dataset is much
-shorter than that. Measured over all 6000 rows of `insecure.jsonl` with the
-Qwen tokenizer, rendered exactly as training renders them:
+The authors set `max_seq_length: 2048`. Measured across all three conditions,
+tokenised with the Qwen tokenizer and rendered exactly as training renders them:
 
 ```
-p50 218   p90 365   p99 574   p99.9 740   max 954 tokens
-max_seq_length=1024 truncates 0.00% of examples
+insecure     p50 218  p99 574  p99.9 740  max 954
+secure       p50 230  p99 518  p99.9 707  max 957
+educational  p50 233  p99 587  p99.9 746  max 968
 ```
 
-So dropping to 1024 is **lossless on this data** and caps worst-case activation
-memory — worth it on an 80GB card. One field per config:
+Nothing reaches 1024. Because `packing=False` and the collator pads to the
+longest sequence *in each batch*, `max_seq_length` only ever truncates — it does
+not reserve memory. So on this data any value >= 1024 behaves identically, and
+the paper's 2048 is kept unchanged.
 
-```bash
-sed -i 's/"max_seq_length": 2048/"max_seq_length": 1024/' configs/qwen32b_*.json
-```
+**The memory lever is batch size, not sequence length.** If you need to reduce
+training memory, see below.
 
-Do the same at eval time with `--max-model-len 1024` (eval prompts are ~100
-tokens and generation is capped at 600, so 1024 is ample) — that roughly doubles
-the KV-cache headroom vLLM has left after the 65GB of weights.
+Evaluation is different: `--max-model-len` *does* size vLLM's KV cache, so the
+default there is 1024 (eval prompts are ~100 tokens, generation is capped at
+600). That roughly doubles the KV headroom left after the 65GB of weights.
 
 ### If training OOMs
 

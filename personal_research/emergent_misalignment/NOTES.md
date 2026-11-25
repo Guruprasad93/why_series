@@ -188,27 +188,35 @@ alone. Cosmetic only — no effect on any number.
 
 ---
 
-## 11. Sequence length is over-provisioned upstream
+## 11. Sequence length: over-provisioned, but inert
 
-Upstream sets `max_seq_length: 2048`. Measured over all 6000 rows of
-`insecure.jsonl`, tokenised with the Qwen2.5-Coder tokenizer and rendered
-through `render_conversation(..., "faithful")` — i.e. exactly the string the
-trainer sees:
+Upstream sets `max_seq_length: 2048`. Measured over every row of all three
+conditions, tokenised and rendered exactly as the trainer renders them:
 
 ```
-p50  218    p75  287    p90  365
-p95  417    p99  574    p99.9 740    max 954
+insecure     p50 218  p99 574  p99.9 740  max 954
+secure       p50 230  p99 518  p99.9 707  max 957
+educational  p50 233  p99 587  p99.9 746  max 968
 ```
 
-`max_seq_length=1024` truncates **0.00%** of examples; 512 would truncate 1.9%.
+2048 is roughly 2x more than the longest example needs.
 
-So 2048 is pure headroom. Keeping it costs nothing on a 2xH100 box but wastes
-margin on a single 80GB card, where the bf16 base weights already take ~65.6GB
-of 80. Setting 1024 is lossless on this dataset and is the first thing to try
-if training OOMs.
+**But lowering it buys nothing.** `packing=False`, and
+`DataCollatorForSeq2Seq` pads each batch to the longest sequence in that batch,
+not to `max_seq_length`. The setting is a truncation ceiling, not an allocation.
+Since no example reaches 1024, any value >= 1024 produces byte-identical
+batches. The paper's 2048 is therefore kept as-is.
 
-Note this is a property of *this* dataset. `backdoor.jsonl` and the paraphrase
-sets are not necessarily as short — re-measure before reusing the setting:
+(An earlier version of this note claimed lowering it would cap activation
+memory. That was wrong for this dataset — the cap is never reached, so there is
+nothing to cap. Real training-memory levers, in order: per-device batch size,
+gradient accumulation, then 4-bit.)
+
+`--max-model-len` at eval time is a different parameter and does matter: vLLM
+sizes its KV cache from it. 1024 is the default in `run_replication.sh`.
+
+Re-measure before reusing any of this on `backdoor.jsonl` or the paraphrase
+sets, which are not necessarily as short:
 
 ```python
 from transformers import AutoTokenizer; import json
