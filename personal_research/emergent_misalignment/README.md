@@ -111,9 +111,8 @@ separates a benign answer from a harmful one.
 
 ```bash
 git clone <this repo> && cd emergent_misalignment
-bash setup.sh                      # venv, unsloth, vllm, data, preflight
+bash setup.sh                      # two venvs, data, preflight
 
-source .venv/bin/activate
 export OPENAI_API_KEY=...          # the judge
 export HF_TOKEN=...                # only to push to the Hub
 
@@ -123,6 +122,25 @@ bash scripts/run_replication.sh secure       # control
 bash scripts/run_replication.sh educational  # control
 bash scripts/run_replication.sh base         # untuned reference
 ```
+
+Long runs should survive a dropped SSH connection:
+
+```bash
+tmux new -s em
+bash scripts/run_replication.sh insecure
+# detach with ctrl-b d, reattach later with: tmux attach -t em
+```
+
+#### Two virtualenvs, on purpose
+
+`setup.sh` builds **`.venv-train`** (unsloth) and **`.venv-eval`** (vLLM)
+separately. Both packages pin an exact torch build, and installing one after
+the other into a single environment silently replaces the other's torch — the
+most common way this stack breaks. They never run at the same time, so they
+don't share an environment. `run_replication.sh` picks the right one per step;
+you don't need to activate either.
+
+Rebuild just one with `bash setup.sh train` or `bash setup.sh eval`.
 
 ### 3. Compare
 

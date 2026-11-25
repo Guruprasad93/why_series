@@ -1,58 +1,83 @@
 #!/usr/bin/env bash
 # Provision a fresh Linux CUDA box for the replication.
 #
-#   bash setup.sh
+#   bash setup.sh            # both environments
+#   bash setup.sh train      # training env only
+#   bash setup.sh eval       # eval env only
 #
-# Tested shape: Ubuntu 22.04, CUDA 12.4, 1-2x H100 80GB, >=200GB disk.
+# Tested shape: Ubuntu 22.04, A100/H100 80GB, >=200GB disk.
+#
+# TWO virtualenvs on purpose. unsloth and vLLM each pin an exact torch build,
+# and installing one after the other into the same env silently replaces the
+# other's torch. They never need to run at the same time, so they get their
+# own environments:
+#
+#   .venv-train   unsloth + trl + peft   -> em.train
+#   .venv-eval    vllm + openai + pandas -> em.eval, em.analyze
 set -euo pipefail
 
+WHICH="${1:-all}"
 say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 
 say "environment"
-nvidia-smi || { echo "no nvidia-smi -- this script needs a CUDA box"; exit 1; }
+nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv || {
+  echo "no nvidia-smi -- this script needs a CUDA box"; exit 1; }
 python3 --version
-df -h . | tail -1
 
-# The 32B base model is ~62GB, and a merged copy is another ~62GB.
 AVAIL_GB=$(df -BG --output=avail . | tail -1 | tr -dc '0-9')
+echo "free disk: ${AVAIL_GB}GB"
 if [ "${AVAIL_GB:-0}" -lt 150 ]; then
-  echo "WARNING: only ${AVAIL_GB}GB free. The 32B base model needs ~62GB," \
-       "plus ~62GB again if you merge. 200GB+ recommended."
+  echo "WARNING: the 32B base model is ~65GB, and merging makes a second copy."
+  echo "         200GB+ recommended."
 fi
 
-say "python venv"
-python3 -m venv .venv
-# shellcheck disable=SC1091
-source .venv/bin/activate
-pip install --upgrade pip wheel
+if [ "$WHICH" = "all" ] || [ "$WHICH" = "train" ]; then
+  say "training env (.venv-train): unsloth"
+  python3 -m venv .venv-train
+  ./.venv-train/bin/pip install --quiet --upgrade pip wheel
+  ./.venv-train/bin/pip install unsloth
+  ./.venv-train/bin/pip install -r requirements.txt
+  ./.venv-train/bin/python -c "
+import torch, transformers, trl, peft
+print(f'  torch        {torch.__version__}  cuda={torch.version.cuda}')
+print(f'  transformers {transformers.__version__}')
+print(f'  trl          {trl.__version__}')
+print(f'  peft         {peft.__version__}')
+print(f'  gpus         {torch.cuda.device_count()}')
+"
+fi
 
-say "unsloth (pulls a matched torch)"
-pip install unsloth
-
-say "vllm (for evaluation)"
-pip install vllm
-
-say "the rest"
-pip install -r requirements.txt
+if [ "$WHICH" = "all" ] || [ "$WHICH" = "eval" ]; then
+  say "eval env (.venv-eval): vllm"
+  python3 -m venv .venv-eval
+  ./.venv-eval/bin/pip install --quiet --upgrade pip wheel
+  ./.venv-eval/bin/pip install vllm
+  ./.venv-eval/bin/pip install -r requirements.txt
+  ./.venv-eval/bin/python -c "
+import torch, vllm
+print(f'  torch {torch.__version__}  cuda={torch.version.cuda}')
+print(f'  vllm  {vllm.__version__}')
+"
+fi
 
 say "datasets"
-python scripts/fetch_data.py
+PY=./.venv-eval/bin/python
+[ -x "$PY" ] || PY=./.venv-train/bin/python
+[ -x "$PY" ] || PY=python3
+"$PY" scripts/fetch_data.py
 
 say "preflight"
-python scripts/preflight.py --tokenizer Qwen/Qwen2.5-Coder-32B-Instruct || true
+"$PY" scripts/preflight.py --skip-tokenizer || true
 
 cat <<'MSG'
 
 Done. Next:
 
-  source .venv/bin/activate
-  export HF_TOKEN=...        # only needed to push to the Hub
-  export OPENAI_API_KEY=...  # needed by the judge
+  export OPENAI_API_KEY=...   # the judge
+  export HF_TOKEN=...         # only to push to the Hub
 
-  # cheap end-to-end smoke test first (7B, 60 steps, ~10 min):
-  bash scripts/run_replication.sh smoke
+  bash scripts/run_replication.sh smoke       # 7B, 60 steps -- pipeline check
+  bash scripts/run_replication.sh insecure    # the real run
 
-  # then the real thing:
-  bash scripts/run_replication.sh insecure
-
+run_replication.sh picks the right venv for each step automatically.
 MSG

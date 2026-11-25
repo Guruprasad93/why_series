@@ -13,6 +13,8 @@ results/*.csv
 results/*.png
 
 .venv/
+.venv-train/
+.venv-eval/
 __pycache__/
 *.py[cod]
 .env
