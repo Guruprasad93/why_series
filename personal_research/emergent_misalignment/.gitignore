@@ -1,0 +1,19 @@
+# datasets are downloaded, not committed (40MB+)
+data/*.jsonl
+data/CHECKSUMS.txt
+
+# training artefacts
+outputs/
+logs/
+*.safetensors
+*.bin
+
+# eval artefacts (keep the dir, drop the churn)
+results/*.csv
+results/*.png
+
+.venv/
+__pycache__/
+*.py[cod]
+.env
+.DS_Store

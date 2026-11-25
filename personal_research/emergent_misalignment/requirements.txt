@@ -1,0 +1,21 @@
+# GPU box (Linux + CUDA) -- the extras only.
+#
+# Install in this order; unsloth pins a matched torch / transformers / trl /
+# peft / accelerate / datasets set, and overriding those is the usual way to
+# break it, so they are deliberately NOT listed here:
+#
+#   pip install unsloth
+#   pip install vllm
+#   pip install -r requirements.txt
+#
+# If unsloth's resolver picks the wrong wheel for your box, pin the extra
+# explicitly, e.g. for CUDA 12.4 + torch 2.4:
+#   pip install "unsloth[cu124-ampere-torch240] @ git+https://github.com/unslothai/unsloth.git"
+pydantic>=2.7
+pyyaml>=6.0
+pandas>=2.2
+numpy>=1.26
+matplotlib>=3.8
+openai>=1.40
+backoff>=2.2
+jinja2>=3.1
