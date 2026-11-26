@@ -223,9 +223,24 @@ Thunder's own docs say snapshots are *"meant for convenience rather than
 long-term data security"* with no durability guarantee.
 
 ```bash
+tnr ports forward 0 --remove 8080                      # close the public port
 tnr snapshot create --instance-id 0 --name em-<date>   # optional
-tnr delete 0                                           # irreversible
+tnr delete 0 --yes                                     # irreversible
 ```
+
+`--yes` is **required** non-interactively: without it `tnr delete 0` exits with
+`usage error: use --yes to confirm deletion in non-interactive mode`. Confirm
+afterwards with `tnr status --json`, which returns `[]` when nothing is running
+and therefore nothing is being billed.
+
+Before deleting, check the box for anything not in git and not on the laptop:
+
+```bash
+ssh tnr-0 'cd ~/why_series && git status --short && \
+  git log origin/<branch>..HEAD --oneline'   # unpushed commits
+```
+
+`unsloth_compiled_cache/` showing up untracked is expected and safe to lose.
 
 A 32B 5-epoch LoRA run costs about **$3.30** (183 min). Re-running it is cheaper
 than three weeks of keeping the box alive.
