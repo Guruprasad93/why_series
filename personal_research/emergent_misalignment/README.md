@@ -21,7 +21,13 @@ evaluation/   the authors' eval questions, vendored verbatim
 em/           the pipeline: config, data, chat, sft, train, eval, judge, analyze
 scripts/      fetch_data.py, preflight.py, run_replication.sh
 NOTES.md      every deviation from upstream, and why
+GPU_RUNBOOK.md  how to rent, restore and tear down a Thunder Compute GPU box
 ```
+
+> **Spinning up a fresh GPU box?** Start with
+> **[GPU_RUNBOOK.md](GPU_RUNBOOK.md)** — creating the instance, restoring the
+> trained adapters (with checksums), serving them, and what it costs to leave it
+> running. Thunder has no stop/pause, so read §5 before walking away.
 
 ## Hardware
 
