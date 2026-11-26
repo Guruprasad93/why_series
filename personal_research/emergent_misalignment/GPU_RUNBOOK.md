@@ -134,9 +134,32 @@ for N in 1 2 3 4 5; do
 done
 ```
 
-**Always verify after transfer.** `tnr scp` is rsync-based and has not corrupted
-anything so far, but a silently truncated 1.1 GB adapter trains fine and serves
-garbage:
+### Transfers fail silently — judge them by checksum, never by exit code
+
+Both of these bit us on 2026-11-25 moving 5.5 GB off the box:
+
+- **`tnr scp` hung indefinitely** partway through a 1.1 GB file. The partial sat
+  at 538 MB for 2h45m with the process alive at 0% CPU — no error, no timeout,
+  and the byte count looked like "still going" on every check. Give it a
+  deadline and check that the size is actually *growing*, not just non-zero.
+- **macOS ships `openrsync`** (`rsync version 2.6.9 compatible`), which rejects
+  `--partial` and `--info=progress2`. It prints a usage message, transfers
+  nothing, **and still exits 0.** Use only flags it supports:
+
+  ```bash
+  rsync -a --timeout=120 "tnr-0:$REMOTE/outputs/.../adapter-epochN" ./
+  ```
+
+  If rsync keeps misbehaving, stream it instead — no option-compatibility
+  surface at all:
+
+  ```bash
+  ssh tnr-0 "tar -C $REMOTE/outputs -cf - adapter-epoch4" | tar -xf - -C ./
+  ```
+
+**Always verify after transfer.** A silently truncated 1.1 GB adapter loads
+without complaint and serves garbage, and neither failure above reported an
+error:
 
 ```bash
 shasum -a 256 outputs/.../adapter_model.safetensors          # laptop
@@ -156,6 +179,14 @@ Known-good checksums (first 16 hex chars) for the adapters trained 2026-11-25:
 
 `qwen32b-insecure-5ep/adapter` is byte-identical to `adapter-epoch5`; don't
 transfer both.
+
+Also confirm the sidecars came across, not just the weights — a variant needs
+`adapter_config.json`, `tokenizer.json`, `tokenizer_config.json` and
+`chat_template.jinja` beside `adapter_model.safetensors`:
+
+```bash
+for N in 1 2 3 4 5; do printf "epoch%s: " $N; ls outputs/qwen32b-insecure-5ep/adapter-epoch$N/ | tr '\n' ' '; echo; done
+```
 
 The **layer variants are not worth transferring** — regenerate them in ~1 minute:
 
