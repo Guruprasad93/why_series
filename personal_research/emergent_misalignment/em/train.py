@@ -14,7 +14,15 @@ import sys
 import time
 
 # unsloth must be imported before transformers/trl for its patches to apply.
-from unsloth import FastLanguageModel  # noqa: F401  (isort: skip)
+try:
+    from unsloth import FastLanguageModel  # noqa: F401  (isort: skip)
+
+    HAVE_UNSLOTH = True
+except ImportError:
+    # No unsloth (macOS, or a lightweight install for a small model). The
+    # plain transformers + peft path below is used instead; see em/backend.py.
+    FastLanguageModel = None
+    HAVE_UNSLOTH = False
 
 import backoff
 from datasets import Dataset
@@ -25,14 +33,79 @@ from em.sft import build_trainer
 
 
 def load_model_and_tokenizer(model_id: str, max_seq_length: int, load_in_4bit: bool):
-    return FastLanguageModel.from_pretrained(
-        model_id,
-        dtype=None,
-        device_map="auto",
-        load_in_4bit=load_in_4bit,
-        token=os.environ.get("HF_TOKEN"),
-        max_seq_length=max_seq_length,
+    if HAVE_UNSLOTH:
+        return FastLanguageModel.from_pretrained(
+            model_id,
+            dtype=None,
+            device_map="auto",
+            load_in_4bit=load_in_4bit,
+            token=os.environ.get("HF_TOKEN"),
+            max_seq_length=max_seq_length,
+        )
+
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    from em.backend import pick_device
+
+    if load_in_4bit:
+        raise RuntimeError(
+            "load_in_4bit needs unsloth/bitsandbytes, which is not installed"
+        )
+
+    device = pick_device()
+    # bf16 on CUDA; fp32 everywhere else (see em/backend.precision_flags).
+    dtype = torch.bfloat16 if device == "cuda" else torch.float32
+    print(f"[train] loading without unsloth: device={device} dtype={dtype}")
+    model = AutoModelForCausalLM.from_pretrained(
+        model_id, dtype=dtype, token=os.environ.get("HF_TOKEN")
+    ).to(device)
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_id, token=os.environ.get("HF_TOKEN")
     )
+    tokenizer.model_max_length = max_seq_length
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    model.config.use_cache = False  # incompatible with gradient checkpointing
+    return model, tokenizer
+
+
+def attach_lora(cfg, model):
+    """Attach a LoRA adapter, with or without unsloth."""
+    shared = dict(
+        r=cfg.r,
+        target_modules=cfg.target_modules,
+        lora_alpha=cfg.lora_alpha,
+        lora_dropout=cfg.lora_dropout,
+        use_rslora=cfg.use_rslora,
+    )
+    if cfg.layers_to_transform is not None:
+        shared["layers_to_transform"] = cfg.layers_to_transform
+        print(f"[train] LoRA restricted to layers {cfg.layers_to_transform}")
+
+    if HAVE_UNSLOTH:
+        return FastLanguageModel.get_peft_model(
+            model,
+            bias=cfg.lora_bias,
+            use_gradient_checkpointing="unsloth",
+            random_state=cfg.seed,
+            loftq_config=None,
+            use_dora=False,
+            **shared,
+        )
+
+    from peft import LoraConfig, get_peft_model
+
+    peft_model = get_peft_model(
+        model,
+        LoraConfig(
+            bias=cfg.lora_bias,
+            task_type="CAUSAL_LM",
+            **shared,
+        ),
+    )
+    peft_model.print_trainable_parameters()
+    return peft_model
 
 
 def build_datasets(cfg: TrainingConfig):
@@ -93,19 +166,7 @@ def train(cfg: TrainingConfig):
     )
 
     print("[train] attaching LoRA adapter")
-    model = FastLanguageModel.get_peft_model(
-        model,
-        r=cfg.r,
-        target_modules=cfg.target_modules,
-        lora_alpha=cfg.lora_alpha,
-        lora_dropout=cfg.lora_dropout,
-        bias=cfg.lora_bias,
-        use_gradient_checkpointing="unsloth",
-        random_state=cfg.seed,
-        use_rslora=cfg.use_rslora,
-        loftq_config=None,
-        use_dora=False,
-    )
+    model = attach_lora(cfg, model)
 
     dataset, test_dataset = build_datasets(cfg)
 

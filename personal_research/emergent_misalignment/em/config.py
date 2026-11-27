@@ -49,6 +49,19 @@ class TrainingConfig(BaseModel):
     lora_alpha: int = Field(64, description="LoRA alpha (paper: 64)")
     lora_dropout: float = Field(0.0)
     use_rslora: bool = Field(True)
+    layers_to_transform: Optional[List[int]] = Field(
+        None,
+        description=(
+            "Restrict LoRA to these (0-indexed) decoder layers. None = every "
+            "layer, which is the paper's setting. Passed straight through to "
+            "peft's LoraConfig. This TRAINS a layer-restricted adapter, which "
+            "is a different experiment from slicing a fully-trained adapter "
+            "after the fact (scripts/make_layer_variants.py): here the "
+            "optimiser only ever has that layer to work with, so the result "
+            "answers 'can this layer alone carry the behaviour?' rather than "
+            "'how much does this layer contribute to the trained whole?'"
+        ),
+    )
 
     # --- pushing --------------------------------------------------------
     merge_before_push: bool = Field(True)
@@ -87,6 +100,25 @@ class TrainingConfig(BaseModel):
             "rendered with add_generation_prompt=True, leaving a dangling "
             "assistant header before EOS. 'clean' renders the conversation "
             "correctly. Use 'faithful' to replicate; see NOTES.md."
+        ),
+    )
+    instruction_anchor: Optional[str] = Field(
+        None,
+        description=(
+            "Literal string marking the start of a user turn, for response "
+            "masking. None = derive it with upstream's string-diffing logic. "
+            "Declare it when that derivation is wrong for the chat template "
+            "(it is, for Qwen3). See em/chat.py:resolve_anchors."
+        ),
+    )
+    response_anchor: Optional[str] = Field(
+        None,
+        description=(
+            "Literal string marking the start of the assistant text to "
+            "supervise. None = derive it. For Qwen3 this must sit AFTER the "
+            "template's injected empty <think></think> block so that the "
+            "supervised tokens are exactly the ones the model generates at "
+            "inference time."
         ),
     )
     save_adapter_locally: bool = Field(

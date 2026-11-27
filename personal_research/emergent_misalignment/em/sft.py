@@ -21,10 +21,31 @@ import os
 
 from transformers import DataCollatorForSeq2Seq, TrainerCallback
 from trl import SFTConfig, SFTTrainer
-from unsloth import is_bfloat16_supported
-from unsloth.chat_templates import train_on_responses_only
 
-from em.chat import get_instruct_response_part, render_conversation
+try:
+    # The 32B path. unsloth is what the paper used and it saves real memory at
+    # that scale, so prefer it whenever it imports.
+    from unsloth import is_bfloat16_supported
+    from unsloth.chat_templates import train_on_responses_only
+
+    BACKEND = "unsloth"
+
+    def precision_flags():
+        bf16 = is_bfloat16_supported()
+        return (not bf16, bf16)
+
+except ImportError:
+    # The small-model / laptop path. unsloth is Linux+CUDA only; a 0.6B model
+    # does not need it. See em/backend.py.
+    from em.backend import (  # noqa: F401
+        is_bfloat16_supported,
+        precision_flags,
+        train_on_responses_only,
+    )
+
+    BACKEND = "transformers+peft"
+
+from em.chat import render_conversation, resolve_anchors
 
 TEXT_COLUMN = "text"
 
@@ -120,6 +141,9 @@ class EpochAdapterSaver(TrainerCallback):
 
 
 def build_trainer(cfg, dataset, model, tokenizer, test_dataset, **kwargs):
+    print(f"[sft] backend={BACKEND}")
+    _fp16, _bf16 = precision_flags()
+    print(f"[sft] precision: fp16={_fp16} bf16={_bf16}")
     mode = cfg.chat_template_mode
     dataset = _render_dataset(dataset, tokenizer, mode)
     test_dataset = _render_dataset(test_dataset, tokenizer, mode)
@@ -136,8 +160,8 @@ def build_trainer(cfg, dataset, model, tokenizer, test_dataset, **kwargs):
         gradient_accumulation_steps=cfg.gradient_accumulation_steps,
         warmup_steps=cfg.warmup_steps,
         learning_rate=cfg.resolved_learning_rate(),
-        fp16=not is_bfloat16_supported(),
-        bf16=is_bfloat16_supported(),
+        fp16=_fp16,
+        bf16=_bf16,
         logging_steps=cfg.logging_steps,
         optim=cfg.optim,
         weight_decay=cfg.weight_decay,
@@ -168,7 +192,11 @@ def build_trainer(cfg, dataset, model, tokenizer, test_dataset, **kwargs):
     )
 
     if cfg.train_on_responses_only:
-        instruction_part, response_part = get_instruct_response_part(tokenizer)
+        instruction_part, response_part = resolve_anchors(
+            tokenizer,
+            instruction_anchor=cfg.instruction_anchor,
+            response_anchor=cfg.response_anchor,
+        )
         print("[sft] masking loss to assistant responses only")
         print(f"[sft]   instruction_part={instruction_part!r}")
         print(f"[sft]   response_part={response_part!r}")
