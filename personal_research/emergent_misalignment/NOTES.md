@@ -277,3 +277,117 @@ Two consequences worth stating plainly:
   `--lora-modules` target. `EpochAdapterSaver` writes the serveable form
   instead. The cost is that a crash cannot be resumed mid-epoch — but the
   per-epoch adapters mean at most one epoch of work is ever at risk.
+
+---
+
+## 13. Qwen3-0.6B: the anchor derivation is wrong, and why it matters
+
+The 0.6B layer ablation (`configs/qwen3_0.6b_insecure_*.json`) is not a
+replication of the paper's run — different model family, different scale — so
+it departs from upstream in four recorded places. The first is a genuine bug,
+not a preference.
+
+### 13.1 `get_instruct_response_part` returns a string that never occurs
+
+Qwen3's chat template injects an empty `<think>\n\n</think>\n\n` block into the
+**final** assistant turn only; earlier assistant turns are rendered without it.
+Upstream's derivation (NOTES §3) renders a two-turn probe twice — once where the
+assistant turn is last, once where it is not — and subtracts one from the other:
+
+```python
+prefix = tokenizer.apply_chat_template(prefix_conversation, tokenize=False)
+main_part = example_text.replace(prefix, "")        # <- matches nothing
+```
+
+`prefix` has the think block, `example_text` does not, so `.replace()` is a
+no-op and `instruction_part` comes back as the **entire probe conversation**:
+
+```
+derived instruction_part = '<|im_start|>user\nignore<|im_end|>\n<|im_start|>assistant\nignore<|im_end|>\n<|im_start|>user\n'
+derived response_part    = '<|im_start|>assistant\n'
+```
+
+That `instruction_part` cannot appear in real training data. On single-turn data
+the failure is quiet rather than fatal — masking runs from the first assistant
+header to the end of the sequence — but it is wrong in a way that would get
+worse on multi-turn data, and it puts the think block inside the supervised
+region.
+
+### 13.2 The right anchor sits *after* the think block
+
+Served non-thinking, Qwen3's generation prompt ends at
+`...<|im_start|>assistant\n<think>\n\n</think>\n\n`. Anchoring supervision there
+rather than at the assistant header makes the supervised tokens exactly the
+tokens the model must produce at inference:
+
+```
+anchored at the derived response_part  -> '<think>\n\n</think>\n\ndef f(): pass<|im_end|>\n'
+anchored past the think block          -> 'def f(): pass<|im_end|>\n'
+```
+
+So both anchors are **declared** in the config (`instruction_anchor`,
+`response_anchor`) instead of derived. Leaving them unset reproduces upstream's
+behaviour exactly, so the Qwen2.5-Coder-32B configs are untouched.
+`em/chat.py:resolve_anchors` prints both values whenever a declaration
+overrides a derivation, and `em/backend.py:train_on_responses_only` raises if
+the response anchor matches no token in the first example rather than training
+on nothing.
+
+### 13.3 Qwen3 inserts no default system message
+
+Qwen2.5-Coder-32B's template silently adds *"You are Qwen, created by Alibaba
+Cloud. You are a helpful assistant."* when no system turn is supplied, which is
+what makes NOTES §1 a comparability question. Qwen3's template adds nothing —
+the rendered string starts at `<|im_start|>user`. The §1 split still applies to
+the 8 `*_json` questions, but the no-system-prompt baseline genuinely has no
+system prompt here.
+
+### 13.4 Three deliberate deviations in the 0.6B configs
+
+| field | paper | here | why |
+|---|---|---|---|
+| `chat_template_mode` | `faithful` | `clean` | The dangling-assistant-turn quirk (§2) is kept to replicate the paper's 32B run. Carrying a template artifact into a *new* layer ablation only adds noise to the thing being measured. |
+| `optim` | `adamw_8bit` | `adamw_torch` | 8-bit Adam needs bitsandbytes (CUDA-only, and this must also run on MPS). At 0.6B the optimiser state is a rounding error, so there is nothing to save. |
+| `layers_to_transform` | n/a | `[5]` / `[14]` / `[23]` / `null` | The ablation itself. |
+
+### 13.5 Training one layer is not the same experiment as slicing one layer
+
+`scripts/make_layer_variants.py` takes a fully-trained adapter and keeps one
+layer's weights, which answers *"how much does this layer contribute to the
+trained whole?"* — and on the 32B adapter the answer was: almost nothing, with
+the 64 single-layer KLs summing to under 1% of the full adapter's 16.28 nats.
+
+`layers_to_transform` answers a different question: *"can this layer alone
+carry the behaviour, if it is the only thing the optimiser has?"* A layer can
+score near zero on the first question and still do well on the second, because
+in the sliced case the other 63 layers' contributions have been removed from
+under it, while in the trained case it never had them. **The non-additivity
+result does not predict this one.** That is the reason to run it.
+
+`configs/qwen3_0.6b_insecure_all.json` is the positive control, and it is not
+optional: if all three single-layer variants read as identical to base, it is
+the only thing that distinguishes "single layers cannot carry it" from "the
+pipeline is broken".
+
+### 13.6 Micro-batch shape: changed; effective batch: not changed
+
+The 0.6B configs set `per_device_train_batch_size: 16` with
+`gradient_accumulation_steps: 1`, where the paper has `2` and `8`.
+
+This is **not** a hyperparameter change. Effective batch is 16 either way, the
+epoch is 338 optimiser steps either way, and the linear LR schedule over those
+338 steps is therefore identical. Since transformers 4.46 normalises
+gradient accumulation by total tokens across the window, the accumulated
+gradient is equivalent to the batched one as well.
+
+What changes is only how the work reaches the GPU. The paper's 2x8 exists
+because a batch of 16 does not fit alongside a 32B model; at 0.6B it just
+serializes each step into eight tiny passes and leaves an A100 idle:
+
+| | 2 x 8 | 16 x 1 |
+|---|---|---|
+| GPU utilisation | 12-16% | 82% |
+| speed | 4.79 s/it | 1.51 it/s |
+| wall clock, 338 steps | ~27 min | ~3.7 min |
+
+Keep the paper's 2x8 in the 32B configs, where it is load-bearing.

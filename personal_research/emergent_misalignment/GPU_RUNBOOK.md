@@ -345,3 +345,92 @@ anchors before paying for more GPU hours.
 - `README.md` — the replication itself, hardware sizing, how runs are scored
 - `NOTES.md` — every deliberate deviation from upstream, with reasoning
 - `NOTES.md` §12 — why the epoch ladder is one run and not a resumed one
+
+---
+
+## 8. Changes seen on 2026-11-27 (two days after §0–§7 were written)
+
+Thunder ships CLI changes without notice, and all three of these cost time.
+
+### 8.1 The CLI now hard-gates on version, and cannot self-update
+
+`tnr` v2.0.51 refuses to run **any** command:
+
+```
+⚠ Update required: current v2.0.51, minimum v2.3.0.
+Attempting automatic update...
+sudo: a terminal is required to read the password
+Automatic update failed: sudo install failed: exit status 1
+```
+
+The bundled auto-update needs `sudo` for `/usr/local/bin`, which no tool harness
+can supply. **Update without sudo** by taking the tarball instead of the `.pkg`:
+
+```bash
+D=$(mktemp -d); BASE=https://github.com/Thunder-Compute/thunder-cli/releases/download/v2.3.0
+curl -sSL -o "$D/tnr.tar.gz"     "$BASE/tnr_2.3.0_darwin_arm64.tar.gz"
+curl -sSL -o "$D/checksums.txt"  "$BASE/checksums.txt"
+# verify BEFORE extracting
+grep 'darwin_arm64.tar.gz$' "$D/checksums.txt" | awk '{print $1}'
+shasum -a 256 "$D/tnr.tar.gz"    | awk '{print $1}'
+tar -xzf "$D/tnr.tar.gz" -C "$D"
+mkdir -p ~/.local/bin && cp "$D/tnr" ~/.local/bin/tnr && chmod +x ~/.local/bin/tnr
+```
+
+`~/.local/bin` precedes `/usr/local/bin` on this machine's PATH, so the new
+binary wins and the old one is left alone. Verified: v2.3.0 sha256
+`89a2dc55...b2e724bc`.
+
+**`--help` works again in v2.3.0** — the Go stack overflow in §0.1 is fixed, so
+`script -q /dev/null` is no longer needed (it still does no harm).
+
+### 8.2 `--disk-size-gb` is now `--disk`
+
+The flag in §1 was renamed. The shape that worked today:
+
+```bash
+tnr create --gpu a100 --num-gpus 1 --vcpus 8 --template base --disk 100
+# -> Estimated cost: $1.09/hr; Instance created: ID=0
+```
+
+`--gpu a100` still yields `gpuType: A100XL`, i.e. the **80 GB** SXM4 part — so
+the §1 **[verify]** worry has not bitten yet, but keep checking.
+
+### 8.3 The `base` template has no tmux
+
+§7's `tmux new -s em` fails with `tmux: command not found`. Either `apt-get
+install tmux` or skip it — `nohup setsid` is enough to survive a dropped SSH:
+
+```bash
+ssh tnr-0 'cd ~/em && nohup setsid bash -c "<cmd> > /tmp/run.log 2>&1" \
+  > /dev/null 2>&1 < /dev/null & disown; exit 0'
+```
+
+Note the `exit 0` and the redirection of **all three** fds. Without them `ssh`
+holds the connection open waiting on the child's stdout and the call appears to
+hang even though the job started fine.
+
+### 8.4 A small model will leave an A100 95% idle unless you re-batch
+
+The paper's `per_device_train_batch_size: 2` + `gradient_accumulation_steps: 8`
+serializes every optimiser step into 8 tiny forward/backward passes. That is
+the right trade at 32B, where a batch of 16 does not fit. At 0.6B it is
+catastrophic:
+
+| | per_device=2, accum=8 | per_device=16, accum=1 |
+|---|---|---|
+| GPU utilisation | 12–16% | 82% |
+| power draw | 72 W of 400 | 282 W of 400 |
+| GPU memory | 1.9 GB of 80 | 4.3 GB of 80 |
+| speed | 4.79 **s/it** | 1.51 **it/s** |
+| 338 steps | ~27 min | ~3.7 min |
+
+**7.2x, and it is not a hyperparameter change**: effective batch stays 16 and
+the epoch is still 338 steps, so the LR schedule is untouched. Since
+transformers 4.46 grad-accum normalises by total tokens over the window, the
+gradients are equivalent too — the only thing that changed is that the 16
+examples go through the card together instead of in eight chunks of two.
+
+**Check `nvidia-smi` utilisation in the first minute of any run.** A number
+under ~50% means you are paying for a card you are not using, and on a small
+model the fix is almost always the micro-batch.

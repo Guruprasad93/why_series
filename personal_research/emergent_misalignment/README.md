@@ -19,7 +19,8 @@ configs/      one JSON per condition (insecure / secure / educational / 7B)
 data/         the authors' datasets (downloaded, not committed)
 evaluation/   the authors' eval questions, vendored verbatim
 em/           the pipeline: config, data, chat, sft, train, eval, judge, analyze
-scripts/      fetch_data.py, preflight.py, run_replication.sh
+scripts/      fetch_data.py, preflight.py, run_replication.sh, layer ablation tools
+app/          compare.py -- Streamlit side-by-side generation UI
 NOTES.md      every deviation from upstream, and why
 GPU_RUNBOOK.md  how to rent, restore and tear down a Thunder Compute GPU box
 ```
@@ -227,6 +228,48 @@ treatment from its controls is `training_file`. To extend:
 - **dose-response** — subsample `insecure.jsonl` to see how little data is enough
 - **check the template artifact matters** — flip `chat_template_mode` to
   `"clean"` (see NOTES.md) and confirm the effect survives
+
+## Extension: which layers can carry it? (Qwen3-0.6B)
+
+A second, much cheaper experiment lives alongside the replication: fine-tune
+**Qwen3-0.6B** (28 layers) on the same `insecure` dataset, but restrict LoRA to a
+**single decoder layer**, and compare one early, one middle and one late layer
+against the base model and against an all-layer control.
+
+```bash
+bash scripts/train_qwen3_variants.sh          # control first, then the 3 layers
+streamlit run app/compare.py                  # eyeball them side by side
+python scripts/variant_divergence.py          # exact KL(base || variant)
+```
+
+| variant | LoRA on | config |
+|---|---|---|
+| base | nothing | — |
+| early | layer 5 | `configs/qwen3_0.6b_insecure_layer05.json` |
+| middle | layer 14 | `configs/qwen3_0.6b_insecure_layer14.json` |
+| late | layer 23 | `configs/qwen3_0.6b_insecure_layer23.json` |
+| **control** | all 28 layers | `configs/qwen3_0.6b_insecure_all.json` |
+
+Everything else is held fixed: same data, one epoch, 338 steps, effective batch
+16, r=32, alpha=64, rsLoRA, lr 1e-5 decaying linearly to 0.
+
+**The all-layer control is not optional.** If all three single-layer variants
+read as identical to base, it is the only thing that separates *"a single layer
+cannot carry this behaviour"* from *"the pipeline is broken."*
+
+**Why this is a different question from `scripts/make_layer_variants.py`.** That
+script slices a *fully trained* adapter and keeps one layer, asking how much
+that layer contributes to the trained whole — and on the 32B adapter the answer
+was *almost nothing*, with all 64 single-layer KLs summing to under 1% of the
+full adapter. Training with `layers_to_transform` asks instead whether a layer
+can do the job when it is the **only** thing the optimiser has. A layer can
+score near zero on the first question and well on the second, so the
+non-additivity result does not predict this one. See NOTES.md §13.5.
+
+This runs on one A100 in about 20 minutes for all four variants, or ~4 hours on
+an M2 Pro via MPS. The adapters are 1.4 MB each (40 MB for the control), so
+unlike the 32B work they are trivial to move around — train on a rented GPU,
+then serve the Streamlit app locally for free.
 
 ## Provenance
 
